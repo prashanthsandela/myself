@@ -1,0 +1,100 @@
+name: Deploy to GitHub Pages
+
+# Checks run on every push and pull request; deploy happens only from `main`.
+# Requires Settings -> Pages -> Source: "GitHub Actions".
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Least-privilege token: read the repo, write the Pages deployment.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never run two deploys at once; let an in-flight deploy finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------
+  # Quality gate — must pass before anything goes live.
+  # ---------------------------------------------------------------
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Nu Html Checker (vnu), current release — validates HTML structure and
+      # understands modern CSS (color-mix, etc.). We run the jar directly
+      # rather than via a wrapper action that pins an outdated vnu build.
+      # --errors-only exits non-zero if any error is found.
+      - name: Validate HTML
+        run: |
+          npm install --no-save vnu-jar
+          JAR="$(find node_modules/vnu-jar -name 'vnu.jar' | head -1)"
+          echo "Using validator: $JAR"
+          java -jar "$JAR" --errors-only index.html
+
+      # Verify internal anchors/paths resolve. External hosts (LinkedIn,
+      # GitHub, Google Fonts, mailto) are skipped — they rate-limit bots and
+      # aren't ours to guarantee, so they shouldn't be able to fail a deploy.
+      - name: Check internal links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --no-progress
+            --include-fragments
+            --exclude '^(https?|mailto):'
+            index.html
+          fail: true
+
+  # ---------------------------------------------------------------
+  # Deploy — only after `check` passes.
+  # ---------------------------------------------------------------
+  deploy:
+    needs: check
+    # Only publish from main — PRs and feature branches run checks only.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Requires Pages to be enabled once in Settings -> Pages -> Source:
+      # "GitHub Actions" (the Actions token cannot enable Pages itself).
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      # Publish ONLY the site files — not README, the internal design guide,
+      # or the workflow. Explicit allowlist so nothing else leaks onto Pages.
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp index.html CNAME og.jpg _site/
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
